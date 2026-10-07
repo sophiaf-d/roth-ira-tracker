@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roth Alert Tracker</title>
+  <meta name="description" content="Track the market, follow trend alerts, and model what a Roth IRA would look like if you traded them.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2316a34a'/><path d='M7 22l6-7 5 4 7-9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-row">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <div>
+          <h1>Roth Alert Tracker</h1>
+          <p class="sub"><span id="mkt-status" class="pill">…</span> <span id="updated" class="muted"></span></p>
+        </div>
+      </div>
+      <div class="fid-links">
+        <a class="btn fid" id="fid-login" target="_blank" rel="noopener">Fidelity log in ↗</a>
+        <a class="btn ghost" id="fid-positions" target="_blank" rel="noopener">My positions ↗</a>
+        <a class="btn ghost" id="fid-trade" target="_blank" rel="noopener">Trade ↗</a>
+      </div>
+    </div>
+    <div class="tape" id="tape"></div>
+    <nav class="wrap tabs" id="tabs">
+      <a href="#alerts">Alerts</a>
+      <a href="#market">Market</a>
+      <a href="#model">Model Roth</a>
+      <a href="#projection">Projection</a>
+      <a href="#strategy">Strategy</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <div id="load-error" class="card error" hidden></div>
+
+    <section id="alerts">
+      <h2>Do this next</h2>
+      <p class="hint">What the model portfolio would do at the next session if you're following the alerts. Each ticket links straight to Fidelity.</p>
+      <div id="actions" class="actions"></div>
+
+      <h2>Recent alerts</h2>
+      <div class="card table-wrap"><table id="alerts-table"></table></div>
+    </section>
+
+    <section id="market">
+      <h2>Market</h2>
+      <p class="hint">Sorted by momentum score. Click a row for its chart. <b>HOLD</b> = in an active BUY alert · <b>WATCH</b> = uptrend, waiting for an entry · <b>AVOID</b> = downtrend.</p>
+      <div class="card table-wrap"><table id="market-table"></table></div>
+      <div class="card" id="detail">
+        <div class="detail-head">
+          <h3 id="detail-title"></h3>
+          <div id="detail-links" class="row-links"></div>
+        </div>
+        <div class="chart-box"><canvas id="detail-chart"></canvas></div>
+      </div>
+    </section>
+
+    <section id="model">
+      <h2>Model Roth IRA</h2>
+      <p class="hint">Start with your Roth balance on a date, then buy every BUY alert (strongest momentum first, equal-weight, up to N positions) and sell every SELL alert. Prices are dividend-adjusted, so dividends get reinvested, which is how a Roth compounds.</p>
+      <form id="sim-form" class="card controls">
+        <label>Starting balance <input type="number" name="capital" min="100" step="100"></label>
+        <label>Start date <input type="date" name="startDate"></label>
+        <label>Max positions <input type="number" name="maxPositions" min="1" max="20"></label>
+        <label class="check"><input type="checkbox" name="fractional"> Fractional shares</label>
+        <label class="check"><input type="checkbox" name="execNextDay"> Fill next session (realistic)</label>
+        <label class="check"><input type="checkbox" name="enterExisting"> Buy current HOLDs on day one</label>
+        <label class="check"><input type="checkbox" name="refill"> Refill empty slots with active BUYs</label>
+      </form>
+      <div id="kpis" class="kpis"></div>
+      <div class="card"><div class="chart-box tall"><canvas id="equity-chart"></canvas></div></div>
+      <h3>Holdings today</h3>
+      <div class="card table-wrap"><table id="holdings-table"></table></div>
+      <div class="split-head"><h3>Trade log</h3><button class="btn ghost small" id="export-csv">Export CSV</button></div>
+      <div class="card table-wrap"><table id="trades-table"></table></div>
+    </section>
+
+    <section id="projection">
+      <h2>Projection: tax-free at retirement</h2>
+      <p class="hint">In a Roth IRA, qualified withdrawals after age 59½ (with the account open 5+ years) are tax-free, so every dollar of growth is yours.</p>
+      <form id="proj-form" class="card controls">
+        <label>Your age <input type="number" name="age" min="15" max="80"></label>
+        <label>Retire at <input type="number" name="retireAge" min="30" max="90"></label>
+        <label>Yearly contribution <input type="number" name="contribution" min="0" step="100"></label>
+        <label>Annual return % <input type="number" name="rate" min="-10" max="60" step="0.5"></label>
+        <div class="presets"><span class="muted">Presets:</span>
+          <button type="button" class="chip" data-rate="7">7% conservative</button>
+          <button type="button" class="chip" data-rate="10">10% S&amp;P long-run</button>
+          <button type="button" class="chip" id="rate-model">Model's pace</button>
+        </div>
+      </form>
+      <div id="proj-kpis" class="kpis"></div>
+      <div class="card"><div class="chart-box"><canvas id="proj-chart"></canvas></div></div>
+    </section>
+
+    <section id="strategy">
+      <h2>Strategy &amp; data</h2>
+      <form id="strat-form" class="card controls">
+        <label>Fast MA (days) <input type="number" name="fast" min="2" max="100"></label>
+        <label>Slow MA (days) <input type="number" name="slow" min="5" max="150"></label>
+        <label>Trend MA (days) <input type="number" name="trend" min="50" max="250"></label>
+        <label>Breakout high (days) <input type="number" name="breakout" min="10" max="250"></label>
+        <label>Max RSI to buy <input type="number" name="rsiMax" min="50" max="100"></label>
+        <label>Trailing stop % <input type="number" name="trailStop" min="2" max="50"></label>
+        <button type="button" class="btn ghost small" id="strat-reset">Reset defaults</button>
+      </form>
+      <div class="card prose">
+        <h3>How the alerts work</h3>
+        <ul>
+          <li><b>BUY</b> when the price is above its trend MA, RSI is under the cap, and either the fast MA crosses above the slow MA or the price closes at a new breakout high.</li>
+          <li><b>SELL</b> when the price drops by the trailing-stop % from its high since the BUY, closes below the trend MA, or the fast MA crosses back under the slow MA.</li>
+          <li>Long-only, no margin, no shorting, just like a Roth IRA cash account.</li>
+        </ul>
+        <h3>Live quotes (optional)</h3>
+        <p>Prices refresh about every 15 minutes during market hours from the site's scheduled build. For quotes that update every minute, paste a free <a href="https://finnhub.io/register" target="_blank" rel="noopener">Finnhub API key</a>. It's stored only in this browser.</p>
+        <div class="key-row">
+          <input type="password" id="finnhub-key" placeholder="Finnhub API key" autocomplete="off">
+          <button class="btn small" id="save-key" type="button">Save</button>
+          <span id="key-status" class="muted"></span>
+        </div>
+        <p class="muted">Want different tickers? Edit <code>watchlist.json</code> in the repo; the next build pulls them.</p>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <p>Educational tool for a Roth IRA competition. Not investment advice. Backtested results use hindsight-free rules but are still hypothetical, and past performance doesn't predict future returns. Data from Yahoo Finance (and Finnhub if you add a key). Verify prices in <a id="fid-foot" target="_blank" rel="noopener">Fidelity</a> before trading.</p>
+    </footer>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

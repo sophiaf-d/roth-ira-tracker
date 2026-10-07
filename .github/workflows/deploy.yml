@@ -1,0 +1,40 @@
+name: Refresh market data & deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Every 15 min during US market hours (13:00–21:59 UTC covers 9:30–16:00 ET in EDT and EST), Mon–Fri.
+    - cron: '*/15 13-21 * * 1-5'
+    # One post-close run to lock in the final daily bar.
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch market data
+        run: node scripts/fetch-data.mjs
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deployment
+        uses: actions/deploy-pages@v4

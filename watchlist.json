@@ -1,0 +1,8 @@
+{
+  "benchmark": "SPY",
+  "tickers": [
+    "QQQ", "SMH", "XLK", "XLE", "XLF", "GLD",
+    "NVDA", "AVGO", "AMD", "MSFT", "AAPL", "AMZN", "META", "GOOGL",
+    "TSLA", "NFLX", "PLTR", "LLY", "COST", "JPM", "CRWD", "UBER"
+  ]
+}
