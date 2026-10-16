@@ -132,6 +132,9 @@ select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); borde
 
 .caveat { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 
+.market-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text); width: 220px; }
+
 /* controls */
 .controls { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; }
 .controls label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; }

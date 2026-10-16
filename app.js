@@ -25,6 +25,8 @@ const S = {
   proj: { ...DEFAULT_PROJECTION, ...store.get('proj', {}) },
   finnhubKey: store.get('finnhubKey', ''),
   newsFilter: store.get('newsFilter', 'picks'),
+  marketView: store.get('marketView', 'top'),
+  marketQuery: '',
   selected: null,
   live: false,
 };
@@ -33,7 +35,8 @@ let AN = {};
 let SIM = null;
 let ROT = null;     // momentum rotation over the user's window
 let CMP = null;     // full-history comparison + evidence
-let IDX = {};       // symbol -> Map(date -> bar index)
+let IDX = {};
+let CUR_RANK = null; // today's rank of every symbol, cached per recompute       // symbol -> Map(date -> bar index)
 const charts = {};
 
 // ---------- indicators ----------
@@ -116,14 +119,28 @@ function analyzeAll() {
   }
 }
 
+// Only count a stock from the date it joined the index (no hindsight about future winners).
+const isMember = (s, d) => MARKET.symbols[s].member && d >= MARKET.symbols[s].since;
 const pxAt = (s, d) => { const i = IDX[s].get(d); return i == null ? null : MARKET.symbols[s].adj[i]; };
 
 // Symbols ranked by momentum score on a date. Eligible = above the trend MA with a positive score.
+// Take the first N from a ranked list, allowing at most `cap` per sector (ETFs count as their own sector).
+function pickTop(list, N, cap = S.plan.sectorCap) {
+  const used = {}, out = [];
+  for (const x of list) {
+    if (out.length >= N) break;
+    const sec = MARKET.symbols[x.sym ?? x].sector || x.sym;
+    if (cap > 0 && (used[sec] || 0) >= cap) continue;
+    used[sec] = (used[sec] || 0) + 1; out.push(x);
+  }
+  return out;
+}
+
 function rankAt(d, eligibleOnly = true) {
   const out = [];
   for (const s of Object.keys(AN)) {
     const i = IDX[s].get(d), a = AN[s];
-    if (i == null || a.score[i] == null) continue;
+    if (i == null || a.score[i] == null || !isMember(s, d)) continue;
     const ok = MARKET.symbols[s].adj[i] > a.t[i] && a.score[i] > 0;
     if (ok || !eligibleOnly) out.push({ sym: s, score: a.score[i], ok });
   }
@@ -173,6 +190,7 @@ function simulate(opts = {}) {
     for (const b of list) {
       const free = p.maxPositions - Object.keys(pos).length;
       const px = priceAt(b.sym, d);
+      if (!isMember(b.sym, d)) continue;
       if (free <= 0 || !px) { skipped.push({ ...b, date: d }); continue; }
       const amt = cash / free;
       const sh = p.fractional ? Math.floor(amt / px * 1000) / 1000 : Math.floor(amt / px);
@@ -209,7 +227,7 @@ function simulate(opts = {}) {
     let cashAfter = cash + sells.reduce((a, e) => a + pos[e.sym].shares * pos[e.sym].last, 0);
     let held = Object.keys(pos).length - sells.length;
     sells.forEach(e => actions.push({ type: 'SELL', sym: e.sym, reason: e.reason, signalDate: e.signalDate, shares: pos[e.sym].shares, value: pos[e.sym].shares * pos[e.sym].last }));
-    pending.filter(e => e.type === 'BUY' && !pos[e.sym])
+    pending.filter(e => e.type === 'BUY' && !pos[e.sym] && isMember(e.sym, lastDay))
       .sort((a, b) => momAt(b.sym, lastDay) - momAt(a.sym, lastDay))
       .forEach(e => {
         const free = p.maxPositions - held;
@@ -221,7 +239,7 @@ function simulate(opts = {}) {
     if (p.refill) {
       const L = s => AN[s].inPos.length - 1;
       const taken = new Set([...Object.keys(pos), ...actions.map(a => a.sym)]);
-      syms.filter(s => !taken.has(s) && AN[s].inPos[L(s)])
+      syms.filter(s => !taken.has(s) && AN[s].inPos[L(s)] && isMember(s, lastDay))
         .sort((a, b) => momAt(b, lastDay) - momAt(a, lastDay))
         .forEach(s => {
           const free = p.maxPositions - held;
@@ -272,7 +290,7 @@ function simulateRotation(o) {
     for (const s in hold) { const px = pxAt(s, d); if (px) last[s] = px; }
     if ((k - k0) % o.rebal === 0) {
       const sig = o.execNextDay ? dates[k - 1] : d;
-      const picks = rankAt(sig).map(x => x.sym).filter(s => pxAt(s, d)).slice(0, o.N);
+      const picks = pickTop(rankAt(sig).filter(x => pxAt(x.sym, d)), o.N).map(x => x.sym);
       const eq = cash + Object.entries(hold).reduce((t, [s, sh]) => t + sh * last[s], 0);
       switches += picks.filter(s => !hold[s]).length;
       hold = {}; cash = eq;
@@ -294,7 +312,7 @@ function evidence(N, h = 21) {
   for (let k = 253; k + h < dates.length; k += h) {
     const d = dates[k], d2 = dates[k + h];
     const fwd = s => { const x = pxAt(s, d), y = pxAt(s, d2); return x && y ? y / x - 1 : null; };
-    const top = rankAt(d).slice(0, N).map(x => fwd(x.sym)).filter(v => v != null);
+    const top = pickTop(rankAt(d), N).map(x => fwd(x.sym)).filter(v => v != null);
     if (!top.length) continue;
     const bot = rankAt(d, false).slice(-N).map(x => fwd(x.sym)).filter(v => v != null);
     const p = mean(top), b = B.adj[k + h] / B.adj[k] - 1;
@@ -354,7 +372,7 @@ function renderStatus() {
 function dayChange(d) { return d.prevClose ? d.price / d.prevClose - 1 : null; }
 
 function renderTape() {
-  const order = [MARKET.benchmark, ...Object.keys(MARKET.symbols).filter(s => s !== MARKET.benchmark)];
+  const order = [MARKET.benchmark, ...MARKET.watchlist.filter(s => s !== MARKET.benchmark && MARKET.symbols[s])];
   $('#tape').innerHTML = order.map(s => {
     const d = MARKET.symbols[s], ch = dayChange(d);
     return `<span><b>${esc(s)}</b>${usd(d.price)} <span class="${tone(ch)}">${pct(ch, 2)}</span></span>`;
@@ -382,8 +400,10 @@ function renderActions() {
 }
 
 function renderAlerts() {
-  const rows = [];
+  const rows = [], R = currentRanks();
+  const relevant = new Set([...MARKET.watchlist, ...Object.keys(SIM.pos), ...Object.keys(R).filter(s => R[s] <= 50)]);
   for (const [s, a] of Object.entries(AN)) {
+    if (!relevant.has(s)) continue;
     const dates = MARKET.symbols[s].dates;
     for (const e of a.events) if (e.i >= dates.length - 30) rows.push({ ...e, sym: s, date: dates[e.i] });
   }
@@ -397,18 +417,29 @@ function renderAlerts() {
     }).join('')}</tbody>` : `<tbody><tr><td class="empty">No alerts in the last 30 sessions.</td></tr></tbody>`;
 }
 
+function currentRanks() {
+  if (!CUR_RANK) CUR_RANK = Object.fromEntries(rankAt(MARKET.dates.at(-1), false).map((x, i) => [x.sym, i + 1]));
+  return CUR_RANK;
+}
+
 function renderMarket() {
-  const syms = Object.keys(MARKET.symbols).sort((a, b) => {
-    const A = AN[a], B = AN[b];
-    return B.mom[B.mom.length - 1] - A.mom[A.mom.length - 1];
-  });
+  const R = currentRanks(), q = S.marketQuery.trim().toUpperCase(), wl = new Set(MARKET.watchlist);
+  const byRank = (a, b) => (R[a] ?? 1e9) - (R[b] ?? 1e9);
+  let syms = Object.keys(MARKET.symbols);
+  if (q) syms = syms.filter(s => s.includes(q) || (MARKET.symbols[s].name || '').toUpperCase().includes(q));
+  else if (S.marketView === 'top') syms = syms.filter(s => R[s] <= 50);
+  else if (S.marketView === 'watch') syms = syms.filter(s => wl.has(s) || s === MARKET.benchmark);
+  syms.sort(byRank);
+  $$('#market-filter .chip').forEach(b => b.classList.toggle('on', !q && b.dataset.v === S.marketView));
+  $('#market-count').textContent = `${syms.length} of ${Object.keys(MARKET.symbols).length}`;
   $('#market-table').innerHTML = `
-    <thead><tr><th>Symbol</th><th class="num">Price</th><th class="num">Day</th><th class="num">1M</th><th class="num">3M</th><th class="num">6M</th><th class="num">RSI</th><th class="num">vs ${S.strategy.trend}d MA</th><th>Signal</th><th>Last alert</th><th>Fidelity</th></tr></thead>
+    <thead><tr><th class="num">Rank</th><th>Symbol</th><th class="num">Price</th><th class="num">Day</th><th class="num">1M</th><th class="num">3M</th><th class="num">6M</th><th class="num">RSI</th><th class="num">vs ${S.strategy.trend}d MA</th><th>Signal</th><th>Last alert</th><th>Fidelity</th></tr></thead>
     <tbody>${syms.map(s => {
       const d = MARKET.symbols[s], a = AN[s], c = d.adj, L = c.length - 1, ch = dayChange(d);
       const vsT = a.t[L] ? c[L] / a.t[L] - 1 : null;
       const last = a.last ? `<span class="badge ${a.last.type}">${a.last.type}</span> ${fmtDate(d.dates[a.last.i])}` : '—';
       return `<tr data-sym="${esc(s)}" class="${S.selected === s ? 'sel' : ''}">
+        <td class="num muted">${R[s] ?? '—'}</td>
         <td class="sym"><b>${esc(s)}</b><span>${esc(d.name)}</span></td>
         <td class="num">${usd(d.price)}</td><td class="num ${tone(ch)}">${pct(ch, 2)}</td>
         <td class="num ${tone(ret(c, L, 21))}">${pct(ret(c, L, 21))}</td>
@@ -439,7 +470,8 @@ function upsertChart(key, canvas, config) {
 }
 
 function renderDetail() {
-  const s = S.selected || Object.keys(MARKET.symbols).sort((a, b) => AN[b].mom.at(-1) - AN[a].mom.at(-1))[0];
+  const R = currentRanks();
+  const s = S.selected && MARKET.symbols[S.selected] ? S.selected : Object.keys(R).sort((a, b) => R[a] - R[b])[0];
   S.selected = s;
   const d = MARKET.symbols[s], a = AN[s];
   const from = Math.max(0, d.adj.length - 252);
@@ -589,7 +621,7 @@ function buildPlan() {
     const adj = p.useNews && news.n ? x.score * (1 + 0.3 * news.score) : x.score;
     return { ...x, news, adj };
   }).sort((x, y) => y.adj - x.adj);
-  const picks = cands.slice(0, N);
+  const picks = pickTop(cands, N);
   const slot = p.amount / N;
   const rows = picks.map(x => {
     const s = x.sym, d = MARKET.symbols[s], A = AN[s], L = d.adj.length - 1;
@@ -597,7 +629,7 @@ function buildPlan() {
     const lastBuy = [...A.events].reverse().find(e => e.type === 'BUY');
     const trendLine = A.t[L] * d.price / d.adj[L];
     return {
-      sym: s, name: d.name, price: d.price, shares, cost: shares * d.price, rank: rankOf[s], news: x.news,
+      sym: s, name: d.name, sector: d.sector, price: d.price, shares, cost: shares * d.price, rank: rankOf[s], news: x.news,
       r126: ret(d.adj, L, 126),
       why: method === 'rotation'
         ? `#${rankOf[s]} of ${ranked.length} by momentum score`
@@ -606,7 +638,8 @@ function buildPlan() {
     };
   });
   const invested = rows.reduce((t, r) => t + r.cost, 0);
-  const bench = cands.slice(N, N + 4).map(x => x.sym);
+  const chosen = new Set(picks.map(x => x.sym));
+  const bench = cands.filter(x => !chosen.has(x.sym)).slice(0, 4).map(x => x.sym);
   return { method, rows, invested, cash: p.amount - invested, emptySlots: N - rows.length, bench, N };
 }
 
@@ -626,10 +659,10 @@ function renderPlan() {
         <div class="s">${p.method === 'auto' ? `Picked automatically: ${pct(mine.totalRet, 0)} since ${fmtDate(C.start)} vs ${pct(other.totalRet, 0)} for ${METHOD_NAME[P.method === 'rotation' ? 'alerts' : 'rotation'].toLowerCase()} and ${pct(mine.benchRet, 0)} for ${MARKET.benchmark}.` : 'Chosen by you.'}</div></div>
       <div><div class="l">Score track record</div><div class="v">${ev.beatPct != null ? Math.round(ev.beatPct * 100) + '%' : '—'} of months</div>
         <div class="s">the top ${P.N} by score beat ${MARKET.benchmark} the following month (${ev.n} months since ${fmtDate(ev.from)}). Avg ${pct(ev.avgPick)}/mo vs ${pct(ev.avgBench)} for ${MARKET.benchmark}${ev.avgBottom != null ? ` and ${pct(ev.avgBottom)} for the ${P.N} lowest-scored` : ''}.</div></div>
-      <div><div class="l">News</div><div class="v">${(MARKET.news || []).length} headlines</div>
+      <div><div class="l">News</div><div class="v">${(MARKET.news || []).length} headlines</div><div class="s">from Yahoo Finance, Google News, Seeking Alpha, Nasdaq, CNBC and MarketWatch.</div>
         <div class="s">${p.useNews ? 'Headlines from the last 4 days nudge the ranking.' : 'Shown for context, not used in the ranking.'} News isn't part of the backtest.</div></div>
     </div>
-    <p class="caveat">Read the backtest with care: the watchlist was chosen today, already knowing which stocks went on to soar, so every approach looks better than it would have in real time.${ev.avgBottom != null && ev.avgPick - ev.avgBottom < 0.01 ? ` The top-scored picks only beat the lowest-scored ones by ${pct(ev.avgPick - ev.avgBottom)} a month, so most of the gain came from the watchlist itself, not the ranking.` : ''} Past results don't guarantee future returns.</p>`;
+    <p class="caveat">Scanned ${Object.values(MARKET.symbols).filter(d => d.member).length} stocks and ETFs (every S&amp;P 500 member plus sector ETFs). In the backtest, each stock counts only from the date it joined the index, so it can't "know" future winners. Companies that were later dropped from the index (bought out, went bankrupt) aren't in the free data, so results still lean a little optimistic.${ev.avgBottom != null ? ` Score edge: the top ${P.N} beat the ${P.N} lowest-scored by ${pct(ev.avgPick - ev.avgBottom)} a month.` : ''} Past results don't guarantee future returns.</p>`;
   $('#plan-kpis').innerHTML = [
     kpi('Buy now', `${P.rows.length} holding${P.rows.length === 1 ? '' : 's'}`, `≈ ${usd(p.amount / P.N, 0)} each`, '', true),
     kpi('Invested', usd(P.invested), `${(P.invested / p.amount * 100).toFixed(0)}% of ${usd(+p.amount, 0)}`),
@@ -639,7 +672,7 @@ function renderPlan() {
     <thead><tr><th>#</th><th>Buy</th><th class="num">Price</th><th class="num">Shares</th><th class="num">Cost</th><th class="num">6M</th><th>Why</th><th>News</th><th class="num">Sell if below</th><th>Fidelity</th></tr></thead>
     <tbody>${P.rows.map((r, i) => `<tr>
       <td class="muted">${i + 1}</td>
-      <td class="sym"><b>${esc(r.sym)}</b><span>${esc(r.name)}</span></td>
+      <td class="sym"><b>${esc(r.sym)}</b><span>${esc(r.name)}${r.sector ? ' · ' + esc(r.sector) : ''}</span></td>
       <td class="num">${usd(r.price)}</td><td class="num"><b>${r.shares}</b></td><td class="num">${usd(r.cost)}</td>
       <td class="num ${tone(r.r126)}">${pct(r.r126)}</td><td>${esc(r.why)}</td><td>${newsBadge(r.news)}</td>
       <td class="num">${usd(r.stop)}</td><td>${fidLinks(r.sym)}</td></tr>`).join('')}
@@ -670,8 +703,11 @@ function copyPlan() {
 
 function renderNews() {
   const all = MARKET.news || [];
-  const picks = new Set(buildPlan().rows.map(r => r.sym));
-  const items = S.newsFilter === 'picks' ? all.filter(x => x.tickers.some(t => picks.has(t))) : all;
+  const picks = new Set(buildPlan().rows.map(r => r.sym)), wl = new Set(MARKET.watchlist);
+  const items = all.filter(x =>
+    S.newsFilter === 'picks' ? x.tickers.some(t => picks.has(t)) :
+    S.newsFilter === 'watch' ? x.tickers.some(t => wl.has(t)) :
+    S.newsFilter === 'market' ? !x.tickers.length : true);
   $$('#news-filter .chip').forEach(b => b.classList.toggle('on', b.dataset.f === S.newsFilter));
   const ago = t => { const m = Math.round((Date.now() - new Date(t)) / 6e4); return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
   $('#news-list').innerHTML = items.length ? items.slice(0, 80).map(x => {
@@ -679,7 +715,7 @@ function renderNews() {
     return `<li><a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a>
       <div class="meta">${x.tickers.map(t => `<span class="tick">${esc(t)}</span>`).join('')}
       ${cls ? `<span class="badge ${cls}">${tone > 0 ? 'Positive' : 'Negative'}</span>` : ''}
-      <span class="muted">${esc(x.publisher)} · ${ago(x.time)}</span></div></li>`;
+      <span class="muted">${esc(x.publisher)} · ${ago(x.time)}${x.sources?.length > 1 ? ` · in ${x.sources.length} feeds` : ''}</span></div></li>`;
   }).join('') : '<li class="empty">No recent headlines.</li>';
 }
 
@@ -699,11 +735,16 @@ function bindForm(form, obj, key, onChange) {
   });
 }
 
-function recompute() {
-  analyzeAll();
-  SIM = simulate();
+function runBacktests() {
   ROT = simulateRotation({ start: SIM.start, capital: +S.sim.capital, N: S.sim.maxPositions, rebal: S.sim.rebalDays, execNextDay: S.sim.execNextDay });
   CMP = compareStrategies();
+}
+
+function recompute() {
+  analyzeAll();
+  CUR_RANK = null;
+  SIM = simulate();
+  runBacktests();
   renderPlan(); renderNews(); renderActions(); renderAlerts(); renderMarket(); renderDetail(); renderSim(); renderProjection();
 }
 
@@ -726,13 +767,16 @@ async function loadMarket() {
     const old = MARKET.symbols[s];
     if (old) { d.price = old.price; d.prevClose = old.prevClose; }
   }
+  // Each symbol stores an offset into one shared date array; rebuild per-symbol date lists.
+  for (const d of Object.values(next.symbols)) d.dates = next.dates.slice(d.off);
   MARKET = next;
 }
 
 async function pollFinnhub() {
   if (!S.finnhubKey || !MARKET) return;
   let ok = 0;
-  for (const s of Object.keys(MARKET.symbols)) {
+  const names = [...new Set([MARKET.benchmark, ...MARKET.watchlist, ...buildPlan().rows.map(r => r.sym), ...Object.keys(SIM?.pos || {})])].filter(s => MARKET.symbols[s]).slice(0, 50);
+  for (const s of names) {
     try {
       const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(s)}&token=${encodeURIComponent(S.finnhubKey)}`);
       if (!res.ok) throw new Error(res.status);
@@ -777,7 +821,14 @@ function wireStatic() {
   bindForm($('#strat-form'), S.strategy, 'strategy', recompute);
   bindForm($('#sim-form'), S.sim, 'sim', recompute);
   bindForm($('#proj-form'), S.proj, 'proj', renderProjection);
-  bindForm($('#plan-form'), S.plan, 'plan', () => { CMP = compareStrategies(); renderPlan(); renderNews(); renderSim(); });
+  bindForm($('#plan-form'), S.plan, 'plan', () => { runBacktests(); renderPlan(); renderNews(); renderSim(); });
+  $('#market-filter').addEventListener('click', e => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    S.marketView = b.dataset.v; S.marketQuery = ''; $('#market-search').value = '';
+    store.set('marketView', S.marketView); renderMarket();
+  });
+  $('#market-search').addEventListener('input', e => { S.marketQuery = e.target.value; renderMarket(); });
   $('#news-filter').addEventListener('click', e => {
     const b = e.target.closest('.chip');
     if (!b) return;

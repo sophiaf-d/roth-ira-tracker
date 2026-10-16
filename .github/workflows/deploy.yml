@@ -30,6 +30,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Refresh S&P 500 membership (keeps the committed list if Wikipedia is unreachable)
+        run: node scripts/build-universe.mjs || git checkout universe.json
       - name: Fetch market data
         run: node scripts/fetch-data.mjs
       - name: Stamp asset versions (busts the 10-minute browser cache on each deploy)

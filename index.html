@@ -56,6 +56,7 @@
           </select></label>
         <label class="check"><input type="checkbox" name="fractional"> Fractional shares</label>
         <label class="check"><input type="checkbox" name="useNews"> Let news adjust ranking</label>
+        <label>Max per sector <input type="number" name="sectorCap" min="0" max="20"></label>
       </form>
       <div id="plan-why" class="card"></div>
       <div id="plan-kpis" class="kpis"></div>
@@ -78,7 +79,16 @@
 
     <section id="market">
       <h2>Market</h2>
-      <p class="hint">Sorted by momentum score. Click a row for its chart. <b>HOLD</b> = in an active BUY alert · <b>WATCH</b> = uptrend, waiting for an entry · <b>AVOID</b> = downtrend.</p>
+      <p class="hint">Every S&amp;P 500 stock plus sector ETFs, ranked by momentum score. Click a row for its chart. <b>HOLD</b> = in an active BUY alert · <b>WATCH</b> = uptrend, waiting for an entry · <b>AVOID</b> = downtrend.</p>
+      <div class="market-bar">
+        <div id="market-filter" class="presets">
+          <button type="button" class="chip" data-v="top">Top 50</button>
+          <button type="button" class="chip" data-v="watch">My watchlist</button>
+          <button type="button" class="chip" data-v="all">All</button>
+        </div>
+        <input type="search" id="market-search" placeholder="Find a ticker or company" autocomplete="off">
+        <span id="market-count" class="muted"></span>
+      </div>
       <div class="card table-wrap"><table id="market-table"></table></div>
       <div class="card" id="detail">
         <div class="detail-head">
@@ -91,10 +101,12 @@
 
     <section id="news">
       <h2>News</h2>
-      <p class="hint">Headlines for your watchlist from the last week. Refreshed with prices. The tone badge is a simple keyword read, so open the article before acting on it.</p>
+      <p class="hint">Headlines from Yahoo Finance, Google News, Seeking Alpha, Nasdaq, CNBC and MarketWatch for the top-ranked stocks and your watchlist, refreshed with prices. Duplicate stories are merged. The tone badge is a simple keyword read, so open the article before acting on it.</p>
       <div id="news-filter" class="presets">
         <button type="button" class="chip" data-f="picks">Today's picks</button>
-        <button type="button" class="chip" data-f="all">All watchlist</button>
+        <button type="button" class="chip" data-f="watch">My watchlist</button>
+        <button type="button" class="chip" data-f="market">Market</button>
+        <button type="button" class="chip" data-f="all">Everything</button>
       </div>
       <ul id="news-list" class="card news"></ul>
     </section>
@@ -166,7 +178,7 @@
           <button class="btn small" id="save-key" type="button">Save</button>
           <span id="key-status" class="muted"></span>
         </div>
-        <p class="muted">Want different tickers? Edit <code>watchlist.json</code> in the repo; the next build pulls them.</p>
+        <p class="muted">The scan covers every S&amp;P 500 stock (refreshed from Wikipedia on each build) plus sector ETFs. To track extra tickers, like ones outside the S&amp;P 500, add them to <code>watchlist.json</code> in the repo.</p>
       </div>
     </section>
 

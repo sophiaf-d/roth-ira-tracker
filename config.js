@@ -43,6 +43,7 @@ export const DEFAULT_PLAN = {
   fractional: true,
   method: 'auto',      // 'auto' = whichever approach did better over all history, or 'rotation' / 'alerts'
   useNews: true,       // let recent headline tone nudge the ranking
+  sectorCap: 2,        // at most this many picks from one sector (0 = no limit)
 };
 
 export const DEFAULT_PROJECTION = {
