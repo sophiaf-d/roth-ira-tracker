@@ -33,6 +33,7 @@ export const DEFAULT_SIM = {
   execNextDay: true,   // fill at the next session's close (no hindsight)
   enterExisting: true, // on day one, buy what's already flagged HOLD
   refill: true,        // when a slot frees up, buy the strongest symbol still in a BUY alert
+  rebalDays: 21,       // momentum rotation re-ranks every N trading days (21 ≈ monthly)
 };
 
 // "Start today" planner defaults.
@@ -40,6 +41,8 @@ export const DEFAULT_PLAN = {
   amount: ROTH_LIMIT,
   positions: 5,
   fractional: true,
+  method: 'auto',      // 'auto' = whichever approach did better over all history, or 'rotation' / 'alerts'
+  useNews: true,       // let recent headline tone nudge the ranking
 };
 
 export const DEFAULT_PROJECTION = {

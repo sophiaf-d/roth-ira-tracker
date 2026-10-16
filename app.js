@@ -24,12 +24,16 @@ const S = {
   plan: { ...DEFAULT_PLAN, ...store.get('plan', {}) },
   proj: { ...DEFAULT_PROJECTION, ...store.get('proj', {}) },
   finnhubKey: store.get('finnhubKey', ''),
+  newsFilter: store.get('newsFilter', 'picks'),
   selected: null,
   live: false,
 };
 let MARKET = null;
 let AN = {};
 let SIM = null;
+let ROT = null;     // momentum rotation over the user's window
+let CMP = null;     // full-history comparison + evidence
+let IDX = {};       // symbol -> Map(date -> bar index)
 const charts = {};
 
 // ---------- indicators ----------
@@ -89,14 +93,41 @@ function analyze(d, p) {
     inPos[i] = holding;
     peak[i] = holding ? pk : null;
   }
+  // Risk-adjusted momentum score: 12-1, 6- and 3-month returns divided by 3-month volatility.
+  const score = new Array(n).fill(null);
+  for (let i = 252; i < n; i++) {
+    let s1 = 0, s2 = 0;
+    for (let j = i - 62; j <= i; j++) { const x = c[j] / c[j - 1] - 1; s1 += x; s2 += x * x; }
+    const vol = Math.sqrt(Math.max(0, (s2 - s1 * s1 / 63) / 62) * 252);
+    const m = 0.4 * (c[i - 21] / c[i - 252] - 1) + 0.35 * (c[i] / c[i - 126] - 1) + 0.25 * (c[i] / c[i - 63] - 1);
+    score[i] = m / Math.max(vol, 0.1);
+  }
   const L = n - 1;
   const status = inPos[L] ? 'HOLD' : (c[L] > t[L] && f[L] > s[L]) ? 'WATCH' : 'AVOID';
-  return { f, s, t, r, inPos, peak, mom, events, status, last: events[events.length - 1] };
+  return { f, s, t, r, inPos, peak, mom, score, events, status, last: events[events.length - 1] };
 }
 
 function analyzeAll() {
   AN = {};
-  for (const [sym, d] of Object.entries(MARKET.symbols)) AN[sym] = analyze(d, S.strategy);
+  IDX = {};
+  for (const [sym, d] of Object.entries(MARKET.symbols)) {
+    AN[sym] = analyze(d, S.strategy);
+    IDX[sym] = new Map(d.dates.map((x, i) => [x, i]));
+  }
+}
+
+const pxAt = (s, d) => { const i = IDX[s].get(d); return i == null ? null : MARKET.symbols[s].adj[i]; };
+
+// Symbols ranked by momentum score on a date. Eligible = above the trend MA with a positive score.
+function rankAt(d, eligibleOnly = true) {
+  const out = [];
+  for (const s of Object.keys(AN)) {
+    const i = IDX[s].get(d), a = AN[s];
+    if (i == null || a.score[i] == null) continue;
+    const ok = MARKET.symbols[s].adj[i] > a.t[i] && a.score[i] > 0;
+    if (ok || !eligibleOnly) out.push({ sym: s, score: a.score[i], ok });
+  }
+  return out.sort((x, y) => y.score - x.score);
 }
 
 // ---------- simulator ----------
@@ -105,17 +136,15 @@ function defaultStart() {
   return d.toISOString().slice(0, 10);
 }
 
-function simulate() {
-  const p = S.sim;
+function simulate(opts = {}) {
+  const p = { ...S.sim, ...opts };
   const B = MARKET.symbols[MARKET.benchmark];
   const dates = B.dates;
   const minStart = dates[Math.min(dates.length - 2, S.strategy.trend + S.strategy.breakout)];
   const start = (p.startDate || defaultStart()) < minStart ? minStart : (p.startDate || defaultStart());
   const k0 = Math.max(0, dates.findIndex(d => d >= start));
   const syms = Object.keys(AN);
-  const idx = {};
-  for (const s of syms) { const m = new Map(); MARKET.symbols[s].dates.forEach((d, i) => m.set(d, i)); idx[s] = m; }
-  const priceAt = (s, d) => { const i = idx[s].get(d); return i == null ? null : MARKET.symbols[s].adj[i]; };
+  const idx = IDX, priceAt = pxAt;
   const momAt = (s, d) => { const i = idx[s].get(d); return i == null ? -Infinity : AN[s].mom[i]; };
   // Is the symbol in an active BUY alert as of the close we're allowed to act on?
   const activeAt = (s, d) => { const i = idx[s].get(d); const j = i == null ? -1 : i - (p.execNextDay ? 1 : 0); return j >= 0 && AN[s].inPos[j]; };
@@ -216,6 +245,96 @@ function simulate() {
     final, totalRet: final / p.capital - 1, benchRet: bench[bench.length - 1] / p.capital - 1,
     cagr: years > 0.25 ? (final / p.capital) ** (1 / years) - 1 : null, years,
   };
+}
+
+function perfDD(series) {
+  let pk = -Infinity, dd = 0;
+  for (const v of series) { pk = Math.max(pk, v); dd = Math.min(dd, v / pk - 1); }
+  return dd;
+}
+
+function perf(equity, bench, capital, start, end) {
+  let pk = -Infinity, maxDD = 0;
+  for (const v of equity) { pk = Math.max(pk, v); maxDD = Math.min(maxDD, v / pk - 1); }
+  const final = equity.at(-1), years = (new Date(end) - new Date(start)) / (365.25 * 864e5);
+  return { final, maxDD, years, totalRet: final / capital - 1, benchRet: bench.at(-1) / capital - 1,
+    cagr: years > 0.25 ? (final / capital) ** (1 / years) - 1 : null };
+}
+
+// Momentum rotation: every `rebal` sessions, hold the top N eligible stocks equal-weight.
+function simulateRotation(o) {
+  const B = MARKET.symbols[MARKET.benchmark], dates = B.dates;
+  const k0 = Math.max(dates.findIndex(d => d >= o.start), 253);
+  let cash = o.capital, hold = {}, switches = 0;
+  const last = {}, labels = [], equity = [], bench = [];
+  for (let k = k0; k < dates.length; k++) {
+    const d = dates[k];
+    for (const s in hold) { const px = pxAt(s, d); if (px) last[s] = px; }
+    if ((k - k0) % o.rebal === 0) {
+      const sig = o.execNextDay ? dates[k - 1] : d;
+      const picks = rankAt(sig).map(x => x.sym).filter(s => pxAt(s, d)).slice(0, o.N);
+      const eq = cash + Object.entries(hold).reduce((t, [s, sh]) => t + sh * last[s], 0);
+      switches += picks.filter(s => !hold[s]).length;
+      hold = {}; cash = eq;
+      for (const s of picks) { last[s] = pxAt(s, d); hold[s] = eq / o.N / last[s]; cash -= eq / o.N; }
+    }
+    labels.push(d);
+    equity.push(cash + Object.entries(hold).reduce((t, [s, sh]) => t + sh * last[s], 0));
+    bench.push(o.capital * B.adj[k] / B.adj[k0]);
+  }
+  const nextIn = o.rebal - ((dates.length - 1 - k0) % o.rebal);
+  return { start: dates[k0], labels, equity, bench, hold, switches, nextIn, ...perf(equity, bench, o.capital, dates[k0], dates.at(-1)) };
+}
+
+// Track record of the score: every month, did the top N go on to beat SPY over the next month?
+function evidence(N, h = 21) {
+  const B = MARKET.symbols[MARKET.benchmark], dates = B.dates;
+  const mean = xs => xs.reduce((t, x) => t + x, 0) / xs.length;
+  let n = 0, beat = 0, sumP = 0, sumB = 0, sumBot = 0, nBot = 0;
+  for (let k = 253; k + h < dates.length; k += h) {
+    const d = dates[k], d2 = dates[k + h];
+    const fwd = s => { const x = pxAt(s, d), y = pxAt(s, d2); return x && y ? y / x - 1 : null; };
+    const top = rankAt(d).slice(0, N).map(x => fwd(x.sym)).filter(v => v != null);
+    if (!top.length) continue;
+    const bot = rankAt(d, false).slice(-N).map(x => fwd(x.sym)).filter(v => v != null);
+    const p = mean(top), b = B.adj[k + h] / B.adj[k] - 1;
+    n++; if (p > b) beat++; sumP += p; sumB += b;
+    if (bot.length) { sumBot += mean(bot); nBot++; }
+  }
+  return { n, beatPct: n ? beat / n : null, avgPick: sumP / n, avgBench: sumB / n, avgBottom: nBot ? sumBot / nBot : null, from: dates[253] };
+}
+
+// Run both approaches over all available history and pick the one that did better.
+function compareStrategies() {
+  const N = Math.max(1, S.plan.positions);
+  const dates = MARKET.symbols[MARKET.benchmark].dates;
+  const start = dates[Math.min(dates.length - 2, Math.max(253, S.strategy.trend + S.strategy.breakout))];
+  const alerts = simulate({ startDate: start, maxPositions: N, capital: 10000 });
+  const rotation = simulateRotation({ start, capital: 10000, N, rebal: S.sim.rebalDays, execNextDay: S.sim.execNextDay });
+  return { start, alerts, rotation, best: rotation.totalRet >= alerts.totalRet ? 'rotation' : 'alerts', ev: evidence(N) };
+}
+
+// ---------- news ----------
+const POS_WORDS = new Set('beat beats tops topped surge surges soar soars soaring jump jumps rally rallies record upgrade upgraded upgrades raise raises raised outperform strong stronger growth bullish gain gains win wins approval approved approves partnership expands expansion boost boosts higher rise rises climbs climb breakthrough profit profits buyback beating backing'.split(' '));
+const NEG_WORDS = new Set('miss misses missed plunge plunges fall falls falling drop drops slump slumps downgrade downgraded downgrades cut cuts lawsuit sue sued probe investigation recall weak weaker bearish loss losses decline declines sinks sink tumble tumbles crash crashes warning warns warn layoffs fraud ban tariff tariffs delay delays fizzles crisis selloff sell-off lower slammed worries worry fears fear risk risks antitrust fine fined halt halts slashes slash bubble'.split(' '));
+
+function headlineTone(title) {
+  let p = 0, n = 0;
+  for (const w of title.toLowerCase().match(/[a-z-]+/g) || []) { if (POS_WORDS.has(w)) p++; if (NEG_WORDS.has(w)) n++; }
+  return p + n ? (p - n) / (p + n) : 0;
+}
+
+function newsFor(sym, days = 4) {
+  const cutoff = new Date(MARKET.updated) - days * 864e5;
+  return (MARKET.news || []).filter(x => x.tickers.includes(sym) && new Date(x.time) >= cutoff);
+}
+
+function sentimentOf(sym) {
+  const items = newsFor(sym);
+  if (!items.length) return { n: 0, score: 0, label: 'None', cls: '' };
+  const score = items.reduce((t, x) => t + headlineTone(x.title), 0) / items.length;
+  const label = score >= 0.15 ? 'Positive' : score <= -0.15 ? 'Negative' : 'Mixed';
+  return { n: items.length, score, label, cls: label === 'Positive' ? 'HOLD' : label === 'Negative' ? 'AVOID' : 'WATCH', top: items[0] };
 }
 
 // ---------- rendering ----------
@@ -373,6 +492,7 @@ function renderSim() {
       labels: r.labels,
       datasets: [
         { label: 'Following the alerts', data: r.equity, borderColor: css('--accent'), backgroundColor: css('--accent') + '22', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.1 },
+        { label: 'Momentum rotation', data: ROT.equity, borderColor: '#3b82f6', borderWidth: 1.5, pointRadius: 0 },
         { label: `${MARKET.benchmark} buy & hold`, data: r.bench, borderColor: css('--chart-bench'), borderWidth: 1.5, pointRadius: 0, borderDash: [5, 4] },
       ],
     },
@@ -382,6 +502,15 @@ function renderSim() {
       scales: { x: { ticks: { maxTicksLimit: 8, callback(v) { return fmtDate(this.getLabelForValue(v)); } }, grid: { display: false } }, y: { ticks: { callback: v => usd(v, 0) } } },
     },
   });
+
+  const row = (name, x, note = '') => `<tr><td><b>${name}</b>${note}</td><td class="num ${tone(x.totalRet)}">${pct(x.totalRet)}</td><td class="num">${x.cagr != null ? pct(x.cagr) : '—'}</td><td class="num down">${pct(x.maxDD)}</td></tr>`;
+  const benchLine = x => ({ totalRet: x.benchRet, cagr: x.years > 0.25 ? (1 + x.benchRet) ** (1 / x.years) - 1 : null, maxDD: perfDD(x.bench) });
+  const star = k => CMP.best === k ? ' <span class="badge HOLD">best</span>' : '';
+  $('#compare').innerHTML = `
+    <thead><tr><th>Approach</th><th class="num">Your window</th><th class="num">/yr</th><th class="num">Max drop</th></tr></thead>
+    <tbody>${row('Trend alerts', r)}${row('Momentum rotation', ROT)}${row(`${MARKET.benchmark} buy &amp; hold`, benchLine(r))}
+    <tr><th colspan="4">Full history since ${fmtDate(CMP.start)} (${CMP.alerts.years.toFixed(1)} yrs, ${S.plan.positions} holdings)</th></tr>
+    ${row('Trend alerts', CMP.alerts, star('alerts'))}${row('Momentum rotation', CMP.rotation, star('rotation'))}${row(`${MARKET.benchmark} buy &amp; hold`, benchLine(CMP.alerts))}</tbody>`;
 
   const held = Object.entries(r.pos);
   const total = r.final;
@@ -443,56 +572,91 @@ function renderProjection() {
 }
 
 // ---------- start-today planner ----------
+const METHOD_NAME = { rotation: 'Momentum rotation', alerts: 'Trend alerts' };
+
 function buildPlan() {
-  const p = S.plan, ts = S.strategy.trailStop / 100;
-  const picks = Object.keys(AN)
-    .filter(s => AN[s].status === 'HOLD')
-    .sort((a, b) => AN[b].mom.at(-1) - AN[a].mom.at(-1))
-    .slice(0, Math.max(1, p.positions));
-  const slot = p.amount / Math.max(1, p.positions);
-  const rows = picks.map(s => {
-    const d = MARKET.symbols[s], a = AN[s], L = d.adj.length - 1;
+  const p = S.plan, N = Math.max(1, p.positions), ts = S.strategy.trailStop / 100;
+  const method = p.method === 'auto' ? CMP.best : p.method;
+  const lastDay = MARKET.symbols[MARKET.benchmark].dates.at(-1);
+  const ranked = rankAt(lastDay, false);
+  const rankOf = Object.fromEntries(ranked.map((x, i) => [x.sym, i + 1]));
+  let cands = method === 'rotation'
+    ? ranked.filter(x => x.ok)
+    : ranked.filter(x => AN[x.sym].status === 'HOLD');
+  // News nudges the order: strongly positive headlines lift a stock, strongly negative ones push it down.
+  cands = cands.map(x => {
+    const news = sentimentOf(x.sym);
+    const adj = p.useNews && news.n ? x.score * (1 + 0.3 * news.score) : x.score;
+    return { ...x, news, adj };
+  }).sort((x, y) => y.adj - x.adj);
+  const picks = cands.slice(0, N);
+  const slot = p.amount / N;
+  const rows = picks.map(x => {
+    const s = x.sym, d = MARKET.symbols[s], A = AN[s], L = d.adj.length - 1;
     const shares = p.fractional ? Math.floor(slot / d.price * 1000) / 1000 : Math.floor(slot / d.price);
-    const lastBuy = [...a.events].reverse().find(e => e.type === 'BUY');
+    const lastBuy = [...A.events].reverse().find(e => e.type === 'BUY');
+    const trendLine = A.t[L] * d.price / d.adj[L];
     return {
-      sym: s, name: d.name, price: d.price, shares, cost: shares * d.price,
-      r126: ret(d.adj, L, 126), rsi: a.r[L],
-      why: lastBuy ? `${lastBuy.reason} on ${fmtDate(d.dates[lastBuy.i])}` : 'Active BUY alert',
-      stop: d.price * (1 - ts),
+      sym: s, name: d.name, price: d.price, shares, cost: shares * d.price, rank: rankOf[s], news: x.news,
+      r126: ret(d.adj, L, 126),
+      why: method === 'rotation'
+        ? `#${rankOf[s]} of ${ranked.length} by momentum score`
+        : (lastBuy ? `${lastBuy.reason} on ${fmtDate(d.dates[lastBuy.i])}` : 'Active BUY alert'),
+      stop: method === 'rotation' ? trendLine : d.price * (1 - ts),
     };
   });
   const invested = rows.reduce((t, r) => t + r.cost, 0);
-  const watch = Object.keys(AN).filter(s => AN[s].status === 'WATCH').sort((a, b) => AN[b].mom.at(-1) - AN[a].mom.at(-1)).slice(0, 5);
-  return { rows, invested, cash: p.amount - invested, emptySlots: p.positions - rows.length, watch };
+  const bench = cands.slice(N, N + 4).map(x => x.sym);
+  return { method, rows, invested, cash: p.amount - invested, emptySlots: N - rows.length, bench, N };
+}
+
+function newsBadge(n) {
+  if (!n.n) return '<span class="muted">—</span>';
+  const t = n.top ? ` title="${esc(n.top.title)}"` : '';
+  return `<span class="badge ${n.cls}"${t}>${n.label}</span> <span class="muted">${n.n}</span>`;
 }
 
 function renderPlan() {
-  const P = buildPlan(), p = S.plan;
+  const P = buildPlan(), p = S.plan, C = CMP, ev = C.ev;
+  const other = P.method === 'rotation' ? C.alerts : C.rotation;
+  const mine = P.method === 'rotation' ? C.rotation : C.alerts;
+  $('#plan-why').innerHTML = `
+    <div class="why-grid">
+      <div><div class="l">Approach</div><div class="v">${METHOD_NAME[P.method]}</div>
+        <div class="s">${p.method === 'auto' ? `Picked automatically: ${pct(mine.totalRet, 0)} since ${fmtDate(C.start)} vs ${pct(other.totalRet, 0)} for ${METHOD_NAME[P.method === 'rotation' ? 'alerts' : 'rotation'].toLowerCase()} and ${pct(mine.benchRet, 0)} for ${MARKET.benchmark}.` : 'Chosen by you.'}</div></div>
+      <div><div class="l">Score track record</div><div class="v">${ev.beatPct != null ? Math.round(ev.beatPct * 100) + '%' : '—'} of months</div>
+        <div class="s">the top ${P.N} by score beat ${MARKET.benchmark} the following month (${ev.n} months since ${fmtDate(ev.from)}). Avg ${pct(ev.avgPick)}/mo vs ${pct(ev.avgBench)} for ${MARKET.benchmark}${ev.avgBottom != null ? ` and ${pct(ev.avgBottom)} for the ${P.N} lowest-scored` : ''}.</div></div>
+      <div><div class="l">News</div><div class="v">${(MARKET.news || []).length} headlines</div>
+        <div class="s">${p.useNews ? 'Headlines from the last 4 days nudge the ranking.' : 'Shown for context, not used in the ranking.'} News isn't part of the backtest.</div></div>
+    </div>
+    <p class="caveat">Read the backtest with care: the watchlist was chosen today, already knowing which stocks went on to soar, so every approach looks better than it would have in real time.${ev.avgBottom != null && ev.avgPick - ev.avgBottom < 0.01 ? ` The top-scored picks only beat the lowest-scored ones by ${pct(ev.avgPick - ev.avgBottom)} a month, so most of the gain came from the watchlist itself, not the ranking.` : ''} Past results don't guarantee future returns.</p>`;
   $('#plan-kpis').innerHTML = [
-    kpi('Buy now', `${P.rows.length} holding${P.rows.length === 1 ? '' : 's'}`, `≈ ${usd(p.amount / p.positions, 0)} each`, '', true),
+    kpi('Buy now', `${P.rows.length} holding${P.rows.length === 1 ? '' : 's'}`, `≈ ${usd(p.amount / P.N, 0)} each`, '', true),
     kpi('Invested', usd(P.invested), `${(P.invested / p.amount * 100).toFixed(0)}% of ${usd(+p.amount, 0)}`),
-    kpi('Left in cash', usd(P.cash), P.emptySlots > 0 ? `${P.emptySlots} slot${P.emptySlots === 1 ? '' : 's'} waiting for a BUY alert` : 'leftover from rounding'),
+    kpi('Left in cash', usd(P.cash), P.emptySlots > 0 ? `${P.emptySlots} slot${P.emptySlots === 1 ? '' : 's'} with nothing qualifying` : 'leftover from rounding'),
   ].join('');
   $('#plan-table').innerHTML = P.rows.length ? `
-    <thead><tr><th>#</th><th>Buy</th><th class="num">Price</th><th class="num">Shares</th><th class="num">Cost</th><th class="num">Weight</th><th class="num">6M</th><th>Why</th><th class="num">Sell if below</th><th>Fidelity</th></tr></thead>
+    <thead><tr><th>#</th><th>Buy</th><th class="num">Price</th><th class="num">Shares</th><th class="num">Cost</th><th class="num">6M</th><th>Why</th><th>News</th><th class="num">Sell if below</th><th>Fidelity</th></tr></thead>
     <tbody>${P.rows.map((r, i) => `<tr>
       <td class="muted">${i + 1}</td>
       <td class="sym"><b>${esc(r.sym)}</b><span>${esc(r.name)}</span></td>
       <td class="num">${usd(r.price)}</td><td class="num"><b>${r.shares}</b></td><td class="num">${usd(r.cost)}</td>
-      <td class="num">${(r.cost / p.amount * 100).toFixed(1)}%</td>
-      <td class="num ${tone(r.r126)}">${pct(r.r126)}</td><td>${esc(r.why)}</td>
+      <td class="num ${tone(r.r126)}">${pct(r.r126)}</td><td>${esc(r.why)}</td><td>${newsBadge(r.news)}</td>
       <td class="num">${usd(r.stop)}</td><td>${fidLinks(r.sym)}</td></tr>`).join('')}
-      <tr><td></td><td><b>Cash</b><span class="muted"> stays in your Fidelity core position</span></td><td colspan="2"></td><td class="num">${usd(P.cash)}</td><td class="num">${(P.cash / p.amount * 100).toFixed(1)}%</td><td colspan="4"></td></tr></tbody>`
-    : `<tbody><tr><td class="empty">Nothing is in an active BUY alert right now, so the rules say stay in cash and wait. ${P.watch.length ? `Closest to a BUY: ${P.watch.map(esc).join(', ')}.` : ''}</td></tr></tbody>`;
+      <tr><td></td><td><b>Cash</b><span class="muted"> stays in your Fidelity core position</span></td><td colspan="2"></td><td class="num">${usd(P.cash)}</td><td colspan="5"></td></tr></tbody>`
+    : `<tbody><tr><td class="empty">Nothing qualifies right now, so the rules say stay in cash and wait.</td></tr></tbody>`;
+  const rules = P.method === 'rotation' ? `
+      <li><b>Check once a month</b> (next check in about ${C.rotation.nextIn} trading days). Sell anything that's no longer in the top ${P.N} and buy the new names so each is about the same size.</li>
+      <li><b>Sell early</b> if a holding closes below its "Sell if below" price (its ${S.strategy.trend}-day average). That means its uptrend broke.</li>` : `
+      <li><b>Sell</b> if it closes below its "Sell if below" price (${S.strategy.trailStop}% under your buy price). As it rises, that line moves up to ${S.strategy.trailStop}% under its highest close.</li>
+      <li>Also sell if a SELL alert fires for it. It shows up under <b>Do this next</b>. Put the cash into the next stock in a BUY alert.</li>`;
   $('#plan-rules').innerHTML = `
     <h3>After you buy</h3>
-    <ul>
-      <li><b>Sell</b> a holding if it closes below its "Sell if below" price (${S.strategy.trailStop}% under your buy price). As it rises, that line moves up to ${S.strategy.trailStop}% under its highest close. The <b>Model Roth</b> tab shows the updated level.</li>
-      <li>Also sell if a SELL alert fires for it (trend breaks). It shows up under <b>Do this next</b>.</li>
-      <li>When you sell, or if you have an empty slot, put that cash into the next stock in a BUY alert.</li>
+    <ul>${rules}
+      <li>Check the <b>News</b> column before you buy. A "Negative" badge means recent headlines lean bad, so read them first. Hover the badge to see the latest one.</li>
       <li>Prices move during the day, so check the live price in Fidelity. A <b>limit order</b> near the price shown avoids surprises.</li>
     </ul>
-    ${P.watch.length ? `<p class="muted">Uptrending, not a BUY yet: ${P.watch.map(esc).join(', ')}.</p>` : ''}`;
+    ${P.bench.length ? `<p class="muted">Next in line if one of these doesn't work for you: ${P.bench.map(esc).join(', ')}.</p>` : ''}`;
   return P;
 }
 
@@ -502,6 +666,21 @@ function copyPlan() {
   lines.push(`Cash left: ${usd(P.cash)}`);
   const done = () => { $('#plan-copied').textContent = 'Copied'; setTimeout(() => $('#plan-copied').textContent = '', 2000); };
   navigator.clipboard?.writeText(lines.join('\n')).then(done, () => { $('#plan-copied').textContent = 'Copy blocked by the browser'; });
+}
+
+function renderNews() {
+  const all = MARKET.news || [];
+  const picks = new Set(buildPlan().rows.map(r => r.sym));
+  const items = S.newsFilter === 'picks' ? all.filter(x => x.tickers.some(t => picks.has(t))) : all;
+  $$('#news-filter .chip').forEach(b => b.classList.toggle('on', b.dataset.f === S.newsFilter));
+  const ago = t => { const m = Math.round((Date.now() - new Date(t)) / 6e4); return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
+  $('#news-list').innerHTML = items.length ? items.slice(0, 80).map(x => {
+    const tone = headlineTone(x.title), cls = tone > 0 ? 'HOLD' : tone < 0 ? 'AVOID' : '';
+    return `<li><a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a>
+      <div class="meta">${x.tickers.map(t => `<span class="tick">${esc(t)}</span>`).join('')}
+      ${cls ? `<span class="badge ${cls}">${tone > 0 ? 'Positive' : 'Negative'}</span>` : ''}
+      <span class="muted">${esc(x.publisher)} · ${ago(x.time)}</span></div></li>`;
+  }).join('') : '<li class="empty">No recent headlines.</li>';
 }
 
 // ---------- forms ----------
@@ -523,7 +702,9 @@ function bindForm(form, obj, key, onChange) {
 function recompute() {
   analyzeAll();
   SIM = simulate();
-  renderPlan(); renderActions(); renderAlerts(); renderMarket(); renderDetail(); renderSim(); renderProjection();
+  ROT = simulateRotation({ start: SIM.start, capital: +S.sim.capital, N: S.sim.maxPositions, rebal: S.sim.rebalDays, execNextDay: S.sim.execNextDay });
+  CMP = compareStrategies();
+  renderPlan(); renderNews(); renderActions(); renderAlerts(); renderMarket(); renderDetail(); renderSim(); renderProjection();
 }
 
 function exportCSV() {
@@ -594,9 +775,14 @@ function wireStatic() {
     renderProjection();
   });
   bindForm($('#strat-form'), S.strategy, 'strategy', recompute);
-  bindForm($('#sim-form'), S.sim, 'sim', () => { SIM = simulate(); renderActions(); renderSim(); renderProjection(); });
+  bindForm($('#sim-form'), S.sim, 'sim', recompute);
   bindForm($('#proj-form'), S.proj, 'proj', renderProjection);
-  bindForm($('#plan-form'), S.plan, 'plan', renderPlan);
+  bindForm($('#plan-form'), S.plan, 'plan', () => { CMP = compareStrategies(); renderPlan(); renderNews(); renderSim(); });
+  $('#news-filter').addEventListener('click', e => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    S.newsFilter = b.dataset.f; store.set('newsFilter', S.newsFilter); renderNews();
+  });
   $('#plan-copy').addEventListener('click', copyPlan);
 
   // Highlight the tab for the section in view.

@@ -32,6 +32,7 @@
       <a href="#start">Start today</a>
       <a href="#alerts">Alerts</a>
       <a href="#market">Market</a>
+      <a href="#news">News</a>
       <a href="#model">Model Roth</a>
       <a href="#projection">Projection</a>
       <a href="#strategy">Strategy</a>
@@ -43,12 +44,20 @@
 
     <section id="start">
       <h2>Start today: what to buy</h2>
-      <p class="hint">Enter how much cash you have. This picks the strongest stocks that are in an active BUY alert right now, splits your money evenly, and tells you how many shares to buy and where to sell. Any slot without a BUY stays in cash until a new alert fires.</p>
+      <p class="hint">Enter how much cash you have. It backtests two approaches on 5 years of prices, uses whichever did better, ranks stocks by the trend score that has the best track record, and checks recent headlines. Then it tells you how many shares to buy and when to sell.</p>
       <form id="plan-form" class="card controls">
         <label>Cash to invest <input type="number" name="amount" min="1" step="100"></label>
         <label>Number of holdings <input type="number" name="positions" min="1" max="20"></label>
+        <label>Approach
+          <select name="method">
+            <option value="auto">Best historically (auto)</option>
+            <option value="rotation">Momentum rotation</option>
+            <option value="alerts">Trend alerts</option>
+          </select></label>
         <label class="check"><input type="checkbox" name="fractional"> Fractional shares</label>
+        <label class="check"><input type="checkbox" name="useNews"> Let news adjust ranking</label>
       </form>
+      <div id="plan-why" class="card"></div>
       <div id="plan-kpis" class="kpis"></div>
       <div class="card table-wrap"><table id="plan-table"></table></div>
       <div class="plan-foot">
@@ -80,6 +89,16 @@
       </div>
     </section>
 
+    <section id="news">
+      <h2>News</h2>
+      <p class="hint">Headlines for your watchlist from the last week. Refreshed with prices. The tone badge is a simple keyword read, so open the article before acting on it.</p>
+      <div id="news-filter" class="presets">
+        <button type="button" class="chip" data-f="picks">Today's picks</button>
+        <button type="button" class="chip" data-f="all">All watchlist</button>
+      </div>
+      <ul id="news-list" class="card news"></ul>
+    </section>
+
     <section id="model">
       <h2>Model Roth IRA</h2>
       <p class="hint">Start with your Roth balance on a date, then buy every BUY alert (strongest momentum first, equal-weight, up to N positions) and sell every SELL alert. Prices are dividend-adjusted, so dividends get reinvested, which is how a Roth compounds.</p>
@@ -91,8 +110,11 @@
         <label class="check"><input type="checkbox" name="execNextDay"> Fill next session (realistic)</label>
         <label class="check"><input type="checkbox" name="enterExisting"> Buy current HOLDs on day one</label>
         <label class="check"><input type="checkbox" name="refill"> Refill empty slots with active BUYs</label>
+        <label>Rotation re-rank (days) <input type="number" name="rebalDays" min="5" max="126"></label>
       </form>
       <div id="kpis" class="kpis"></div>
+      <h3>Which approach did better?</h3>
+      <div class="card table-wrap"><table id="compare"></table></div>
       <div class="card"><div class="chart-box tall"><canvas id="equity-chart"></canvas></div></div>
       <h3>Holdings today</h3>
       <div class="card table-wrap"><table id="holdings-table"></table></div>
@@ -134,6 +156,7 @@
         <ul>
           <li><b>BUY</b> when the price is above its trend MA, RSI is under the cap, and either the fast MA crosses above the slow MA or the price closes at a new breakout high.</li>
           <li><b>SELL</b> when the price drops by the trailing-stop % from its high since the BUY, closes below the trend MA, or the fast MA crosses back under the slow MA.</li>
+          <li><b>Momentum rotation</b>: every month, rank stocks by risk-adjusted momentum (12-, 6- and 3-month returns divided by volatility), skip any below the trend MA, and hold the top N in equal amounts. This "momentum effect" is one of the most-studied patterns in market research.</li>
           <li>Long-only, no margin, no shorting, just like a Roth IRA cash account.</li>
         </ul>
         <h3>Live quotes (optional)</h3>

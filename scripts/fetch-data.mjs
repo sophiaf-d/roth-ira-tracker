@@ -1,9 +1,10 @@
-// Pulls daily price history for every ticker in watchlist.json and writes
-// data/market.json. Runs in GitHub Actions on a schedule; run it locally too.
+// Pulls daily price history and recent news headlines for every ticker in
+// watchlist.json and writes data/market.json. Runs in GitHub Actions on a schedule; run it locally too.
 // Usage: node scripts/fetch-data.mjs
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 
-const RANGE = '3y';
+const RANGE = '5y';          // 5 years: 1 year of indicator warm-up + ~4 years of backtest
+const NEWS_DAYS = 7;
 const UA = 'Mozilla/5.0'; // a full browser UA string gets rate-limited (429)
 
 const watch = JSON.parse(await readFile(new URL('../watchlist.json', import.meta.url), 'utf8'));
@@ -51,6 +52,13 @@ async function fetchYahoo(symbol) {
   throw lastErr;
 }
 
+async function fetchNews(symbol) {
+  const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&quotesCount=0&newsCount=10`;
+  const res = await fetch(url, { headers: { 'User-Agent': UA } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()).news ?? [];
+}
+
 const symbols = {};
 const failed = [];
 for (const t of tickers) {
@@ -64,6 +72,28 @@ for (const t of tickers) {
   await sleep(250);
 }
 
+// News: keep headlines that Yahoo tags with one of our tickers. A news failure never fails the build.
+const watchSet = new Set(tickers);
+const cutoff = Date.now() - NEWS_DAYS * 864e5;
+const news = new Map();
+for (const t of tickers) {
+  try {
+    for (const n of await fetchNews(t)) {
+      const time = n.providerPublishTime * 1000;
+      if (!n.link?.startsWith('https://') || time < cutoff) continue;
+      const tagged = (n.relatedTickers ?? []).filter(x => watchSet.has(x));
+      if (!tagged.includes(t)) continue;
+      const prev = news.get(n.uuid);
+      if (prev) { prev.tickers = [...new Set([...prev.tickers, ...tagged])]; continue; }
+      news.set(n.uuid, { title: n.title, publisher: n.publisher, link: n.link, time: new Date(time).toISOString(), tickers: tagged });
+    }
+  } catch (e) {
+    console.warn(`news FAIL ${t}: ${e.message}`);
+  }
+  await sleep(250);
+}
+const newsList = [...news.values()].sort((a, b) => b.time.localeCompare(a.time));
+
 if (!symbols[watch.benchmark]) {
   console.error(`Benchmark ${watch.benchmark} failed to load; not writing data.`);
   process.exit(1);
@@ -72,6 +102,6 @@ if (!symbols[watch.benchmark]) {
 await mkdir(new URL('../data/', import.meta.url), { recursive: true });
 await writeFile(
   new URL('../data/market.json', import.meta.url),
-  JSON.stringify({ updated: new Date().toISOString(), benchmark: watch.benchmark, failed, symbols })
+  JSON.stringify({ updated: new Date().toISOString(), benchmark: watch.benchmark, failed, symbols, news: newsList })
 );
-console.log(`Wrote data/market.json (${Object.keys(symbols).length} symbols, ${failed.length} failed)`);
+console.log(`Wrote data/market.json (${Object.keys(symbols).length} symbols, ${failed.length} failed, ${newsList.length} headlines)`);
