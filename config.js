@@ -35,6 +35,13 @@ export const DEFAULT_SIM = {
   refill: true,        // when a slot frees up, buy the strongest symbol still in a BUY alert
 };
 
+// "Start today" planner defaults.
+export const DEFAULT_PLAN = {
+  amount: ROTH_LIMIT,
+  positions: 5,
+  fractional: true,
+};
+
 export const DEFAULT_PROJECTION = {
   age: 20,
   retireAge: 65,

@@ -1,4 +1,4 @@
-import { FIDELITY, ROTH_LIMIT, DEFAULT_STRATEGY, DEFAULT_SIM, DEFAULT_PROJECTION } from './config.js';
+import { FIDELITY, ROTH_LIMIT, DEFAULT_STRATEGY, DEFAULT_SIM, DEFAULT_PLAN, DEFAULT_PROJECTION } from './config.js';
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -21,6 +21,7 @@ const fidLinks = s => `<span class="row-links"><a href="${FIDELITY.quote(s)}" ta
 const S = {
   strategy: { ...DEFAULT_STRATEGY, ...store.get('strategy', {}) },
   sim: { ...DEFAULT_SIM, ...store.get('sim', {}) },
+  plan: { ...DEFAULT_PLAN, ...store.get('plan', {}) },
   proj: { ...DEFAULT_PROJECTION, ...store.get('proj', {}) },
   finnhubKey: store.get('finnhubKey', ''),
   selected: null,
@@ -441,6 +442,68 @@ function renderProjection() {
   $('#rate-model').textContent = SIM?.cagr != null ? `Model's pace (${(SIM.cagr * 100).toFixed(1)}%)` : "Model's pace";
 }
 
+// ---------- start-today planner ----------
+function buildPlan() {
+  const p = S.plan, ts = S.strategy.trailStop / 100;
+  const picks = Object.keys(AN)
+    .filter(s => AN[s].status === 'HOLD')
+    .sort((a, b) => AN[b].mom.at(-1) - AN[a].mom.at(-1))
+    .slice(0, Math.max(1, p.positions));
+  const slot = p.amount / Math.max(1, p.positions);
+  const rows = picks.map(s => {
+    const d = MARKET.symbols[s], a = AN[s], L = d.adj.length - 1;
+    const shares = p.fractional ? Math.floor(slot / d.price * 1000) / 1000 : Math.floor(slot / d.price);
+    const lastBuy = [...a.events].reverse().find(e => e.type === 'BUY');
+    return {
+      sym: s, name: d.name, price: d.price, shares, cost: shares * d.price,
+      r126: ret(d.adj, L, 126), rsi: a.r[L],
+      why: lastBuy ? `${lastBuy.reason} on ${fmtDate(d.dates[lastBuy.i])}` : 'Active BUY alert',
+      stop: d.price * (1 - ts),
+    };
+  });
+  const invested = rows.reduce((t, r) => t + r.cost, 0);
+  const watch = Object.keys(AN).filter(s => AN[s].status === 'WATCH').sort((a, b) => AN[b].mom.at(-1) - AN[a].mom.at(-1)).slice(0, 5);
+  return { rows, invested, cash: p.amount - invested, emptySlots: p.positions - rows.length, watch };
+}
+
+function renderPlan() {
+  const P = buildPlan(), p = S.plan;
+  $('#plan-kpis').innerHTML = [
+    kpi('Buy now', `${P.rows.length} holding${P.rows.length === 1 ? '' : 's'}`, `≈ ${usd(p.amount / p.positions, 0)} each`, '', true),
+    kpi('Invested', usd(P.invested), `${(P.invested / p.amount * 100).toFixed(0)}% of ${usd(+p.amount, 0)}`),
+    kpi('Left in cash', usd(P.cash), P.emptySlots > 0 ? `${P.emptySlots} slot${P.emptySlots === 1 ? '' : 's'} waiting for a BUY alert` : 'leftover from rounding'),
+  ].join('');
+  $('#plan-table').innerHTML = P.rows.length ? `
+    <thead><tr><th>#</th><th>Buy</th><th class="num">Price</th><th class="num">Shares</th><th class="num">Cost</th><th class="num">Weight</th><th class="num">6M</th><th>Why</th><th class="num">Sell if below</th><th>Fidelity</th></tr></thead>
+    <tbody>${P.rows.map((r, i) => `<tr>
+      <td class="muted">${i + 1}</td>
+      <td class="sym"><b>${esc(r.sym)}</b><span>${esc(r.name)}</span></td>
+      <td class="num">${usd(r.price)}</td><td class="num"><b>${r.shares}</b></td><td class="num">${usd(r.cost)}</td>
+      <td class="num">${(r.cost / p.amount * 100).toFixed(1)}%</td>
+      <td class="num ${tone(r.r126)}">${pct(r.r126)}</td><td>${esc(r.why)}</td>
+      <td class="num">${usd(r.stop)}</td><td>${fidLinks(r.sym)}</td></tr>`).join('')}
+      <tr><td></td><td><b>Cash</b><span class="muted"> stays in your Fidelity core position</span></td><td colspan="2"></td><td class="num">${usd(P.cash)}</td><td class="num">${(P.cash / p.amount * 100).toFixed(1)}%</td><td colspan="4"></td></tr></tbody>`
+    : `<tbody><tr><td class="empty">Nothing is in an active BUY alert right now, so the rules say stay in cash and wait. ${P.watch.length ? `Closest to a BUY: ${P.watch.map(esc).join(', ')}.` : ''}</td></tr></tbody>`;
+  $('#plan-rules').innerHTML = `
+    <h3>After you buy</h3>
+    <ul>
+      <li><b>Sell</b> a holding if it closes below its "Sell if below" price (${S.strategy.trailStop}% under your buy price). As it rises, that line moves up to ${S.strategy.trailStop}% under its highest close. The <b>Model Roth</b> tab shows the updated level.</li>
+      <li>Also sell if a SELL alert fires for it (trend breaks). It shows up under <b>Do this next</b>.</li>
+      <li>When you sell, or if you have an empty slot, put that cash into the next stock in a BUY alert.</li>
+      <li>Prices move during the day, so check the live price in Fidelity. A <b>limit order</b> near the price shown avoids surprises.</li>
+    </ul>
+    ${P.watch.length ? `<p class="muted">Uptrending, not a BUY yet: ${P.watch.map(esc).join(', ')}.</p>` : ''}`;
+  return P;
+}
+
+function copyPlan() {
+  const P = buildPlan();
+  const lines = P.rows.map(r => `BUY ${r.shares} ${r.sym} @ ~${usd(r.price)} (${usd(r.cost)}) | sell if below ${usd(r.stop)}`);
+  lines.push(`Cash left: ${usd(P.cash)}`);
+  const done = () => { $('#plan-copied').textContent = 'Copied'; setTimeout(() => $('#plan-copied').textContent = '', 2000); };
+  navigator.clipboard?.writeText(lines.join('\n')).then(done, () => { $('#plan-copied').textContent = 'Copy blocked by the browser'; });
+}
+
 // ---------- forms ----------
 function bindForm(form, obj, key, onChange) {
   for (const el of form.elements) {
@@ -460,7 +523,7 @@ function bindForm(form, obj, key, onChange) {
 function recompute() {
   analyzeAll();
   SIM = simulate();
-  renderActions(); renderAlerts(); renderMarket(); renderDetail(); renderSim(); renderProjection();
+  renderPlan(); renderActions(); renderAlerts(); renderMarket(); renderDetail(); renderSim(); renderProjection();
 }
 
 function exportCSV() {
@@ -498,7 +561,7 @@ async function pollFinnhub() {
   }
   S.live = ok > 0;
   $('#key-status').textContent = S.live ? `Live: ${ok} quotes updated ${new Date().toLocaleTimeString()}` : 'Key saved, but no quotes came back. Check the key.';
-  renderStatus(); renderTape(); renderMarket();
+  renderStatus(); renderTape(); renderMarket(); renderPlan();
 }
 
 // ---------- boot ----------
@@ -533,6 +596,8 @@ function wireStatic() {
   bindForm($('#strat-form'), S.strategy, 'strategy', recompute);
   bindForm($('#sim-form'), S.sim, 'sim', () => { SIM = simulate(); renderActions(); renderSim(); renderProjection(); });
   bindForm($('#proj-form'), S.proj, 'proj', renderProjection);
+  bindForm($('#plan-form'), S.plan, 'plan', renderPlan);
+  $('#plan-copy').addEventListener('click', copyPlan);
 
   // Highlight the tab for the section in view.
   const tabs = $$('#tabs a');
