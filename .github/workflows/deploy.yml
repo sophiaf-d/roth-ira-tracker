@@ -32,6 +32,8 @@ jobs:
           node-version: 22
       - name: Fetch market data
         run: node scripts/fetch-data.mjs
+      - name: Stamp asset versions (busts the 10-minute browser cache on each deploy)
+        run: sed -i "s/__V__/${GITHUB_SHA::7}/g" index.html app.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

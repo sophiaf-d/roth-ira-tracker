@@ -1,4 +1,4 @@
-import { FIDELITY, ROTH_LIMIT, DEFAULT_STRATEGY, DEFAULT_SIM, DEFAULT_PLAN, DEFAULT_PROJECTION } from './config.js';
+import { FIDELITY, ROTH_LIMIT, DEFAULT_STRATEGY, DEFAULT_SIM, DEFAULT_PLAN, DEFAULT_PROJECTION } from './config.js?v=__V__';
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
