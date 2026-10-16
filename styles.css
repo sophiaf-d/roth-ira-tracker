@@ -135,6 +135,17 @@ select { font: inherit; padding: 6px 8px; border: 1px solid var(--border); borde
 .market-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
 input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text); width: 220px; }
 
+.news-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: 1px solid transparent; border-radius: 8px; padding: 3px 6px; margin: -3px -6px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer; white-space: nowrap; }
+.news-btn:hover { border-color: var(--border); background: var(--surface-2); }
+.news-btn .caret { color: var(--muted); }
+.news-row td { background: var(--surface-2); white-space: normal; padding: 6px 16px 12px 48px; }
+.news-row ul { list-style: none; margin: 0; padding: 0; }
+.news-row li { padding: 5px 0; font-size: 13px; }
+.news-row li a { color: var(--text); text-decoration: none; font-weight: 500; }
+.news-row li a:hover { color: var(--accent); text-decoration: underline; }
+.news-row .badge { min-width: 20px; text-align: center; }
+.news-row .more { font-size: 12px; font-weight: 600; }
+
 /* controls */
 .controls { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; }
 .controls label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; }

@@ -27,6 +27,7 @@ const S = {
   newsFilter: store.get('newsFilter', 'picks'),
   marketView: store.get('marketView', 'top'),
   marketQuery: '',
+  openNews: new Set(),
   selected: null,
   live: false,
 };
@@ -333,8 +334,8 @@ function compareStrategies() {
 }
 
 // ---------- news ----------
-const POS_WORDS = new Set('beat beats tops topped surge surges soar soars soaring jump jumps rally rallies record upgrade upgraded upgrades raise raises raised outperform strong stronger growth bullish gain gains win wins approval approved approves partnership expands expansion boost boosts higher rise rises climbs climb breakthrough profit profits buyback beating backing'.split(' '));
-const NEG_WORDS = new Set('miss misses missed plunge plunges fall falls falling drop drops slump slumps downgrade downgraded downgrades cut cuts lawsuit sue sued probe investigation recall weak weaker bearish loss losses decline declines sinks sink tumble tumbles crash crashes warning warns warn layoffs fraud ban tariff tariffs delay delays fizzles crisis selloff sell-off lower slammed worries worry fears fear risk risks antitrust fine fined halt halts slashes slash bubble'.split(' '));
+const POS_WORDS = new Set('beat beats tops topped surge surges soar soars soaring jump jumps rally rallies record upgrade upgraded upgrades raise raises raised outperform strong stronger growth bullish gain gains win wins approval approved approves partnership expands expansion boost boosts higher rise rises climbs climb breakthrough profit profits buyback beating backing surged soared jumped rallied gained climbed rose beats upgrades outperformed rebounds rebound rebounded'.split(' '));
+const NEG_WORDS = new Set('miss misses missed plunge plunges fall falls falling drop drops slump slumps downgrade downgraded downgrades cut cuts lawsuit sue sued probe investigation recall weak weaker bearish loss losses decline declines sinks sink tumble tumbles crash crashes warning warns warn layoffs fraud ban tariff tariffs delay delays fizzles crisis selloff sell-off lower slammed worries worry fears fear risk risks antitrust fine fined halt halts slashes slash bubble dropped fell slid slides slips slipped tumbled plunged sank crashed slumped declined lowered rout downturn'.split(' '));
 
 function headlineTone(title) {
   let p = 0, n = 0;
@@ -643,10 +644,22 @@ function buildPlan() {
   return { method, rows, invested, cash: p.amount - invested, emptySlots: N - rows.length, bench, N };
 }
 
-function newsBadge(n) {
-  if (!n.n) return '<span class="muted">—</span>';
-  const t = n.top ? ` title="${esc(n.top.title)}"` : '';
-  return `<span class="badge ${n.cls}"${t}>${n.label}</span> <span class="muted">${n.n}</span>`;
+const ago = t => { const m = Math.round((Date.now() - new Date(t)) / 6e4); return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
+
+// News cell: a button that opens the stock's headlines in a row underneath (works on touch screens too).
+function newsBadge(n, sym) {
+  if (!n.n) return '<span class="muted">No recent news</span>';
+  const open = S.openNews.has(sym);
+  return `<button type="button" class="news-btn" data-sym="${esc(sym)}" aria-expanded="${open}">
+    <span class="badge ${n.cls}">${n.label}</span> <span class="muted">${n.n} article${n.n === 1 ? '' : 's'}</span> <span class="caret">${open ? '▴' : '▾'}</span></button>`;
+}
+
+function newsRow(sym, cols) {
+  const items = newsFor(sym).slice(0, 6);
+  return `<tr class="news-row" ${S.openNews.has(sym) ? '' : 'hidden'}><td colspan="${cols}"><ul>${items.map(x => {
+    const t = headlineTone(x.title), cls = t > 0 ? 'HOLD' : t < 0 ? 'AVOID' : '';
+    return `<li>${cls ? `<span class="badge ${cls}">${t > 0 ? '+' : '−'}</span> ` : '<span class="badge">·</span> '}<a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a> <span class="muted">${esc(x.publisher)} · ${ago(x.time)}</span></li>`;
+  }).join('')}</ul>${newsFor(sym).length > 6 ? `<a class="more" href="#news" data-more="${esc(sym)}">See all ${newsFor(sym).length} in the News tab →</a>` : ''}</td></tr>`;
 }
 
 function renderPlan() {
@@ -674,8 +687,8 @@ function renderPlan() {
       <td class="muted">${i + 1}</td>
       <td class="sym"><b>${esc(r.sym)}</b><span>${esc(r.name)}${r.sector ? ' · ' + esc(r.sector) : ''}</span></td>
       <td class="num">${usd(r.price)}</td><td class="num"><b>${r.shares}</b></td><td class="num">${usd(r.cost)}</td>
-      <td class="num ${tone(r.r126)}">${pct(r.r126)}</td><td>${esc(r.why)}</td><td>${newsBadge(r.news)}</td>
-      <td class="num">${usd(r.stop)}</td><td>${fidLinks(r.sym)}</td></tr>`).join('')}
+      <td class="num ${tone(r.r126)}">${pct(r.r126)}</td><td>${esc(r.why)}</td><td>${newsBadge(r.news, r.sym)}</td>
+      <td class="num">${usd(r.stop)}</td><td>${fidLinks(r.sym)}</td></tr>${r.news.n ? newsRow(r.sym, 10) : ''}`).join('')}
       <tr><td></td><td><b>Cash</b><span class="muted"> stays in your Fidelity core position</span></td><td colspan="2"></td><td class="num">${usd(P.cash)}</td><td colspan="5"></td></tr></tbody>`
     : `<tbody><tr><td class="empty">Nothing qualifies right now, so the rules say stay in cash and wait.</td></tr></tbody>`;
   const rules = P.method === 'rotation' ? `
@@ -686,7 +699,7 @@ function renderPlan() {
   $('#plan-rules').innerHTML = `
     <h3>After you buy</h3>
     <ul>${rules}
-      <li>Check the <b>News</b> column before you buy. A "Negative" badge means recent headlines lean bad, so read them first. Hover the badge to see the latest one.</li>
+      <li>Check the <b>News</b> column before you buy. The badge is the overall tone of the last 4 days of headlines (<b>Positive</b>, <b>Negative</b> or <b>Mixed</b>), and the number is how many articles there were. Click it to read them.</li>
       <li>Prices move during the day, so check the live price in Fidelity. A <b>limit order</b> near the price shown avoids surprises.</li>
     </ul>
     ${P.bench.length ? `<p class="muted">Next in line if one of these doesn't work for you: ${P.bench.map(esc).join(', ')}.</p>` : ''}`;
@@ -709,7 +722,6 @@ function renderNews() {
     S.newsFilter === 'watch' ? x.tickers.some(t => wl.has(t)) :
     S.newsFilter === 'market' ? !x.tickers.length : true);
   $$('#news-filter .chip').forEach(b => b.classList.toggle('on', b.dataset.f === S.newsFilter));
-  const ago = t => { const m = Math.round((Date.now() - new Date(t)) / 6e4); return m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
   $('#news-list').innerHTML = items.length ? items.slice(0, 80).map(x => {
     const tone = headlineTone(x.title), cls = tone > 0 ? 'HOLD' : tone < 0 ? 'AVOID' : '';
     return `<li><a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a>
@@ -835,6 +847,17 @@ function wireStatic() {
     S.newsFilter = b.dataset.f; store.set('newsFilter', S.newsFilter); renderNews();
   });
   $('#plan-copy').addEventListener('click', copyPlan);
+  $('#plan-table').addEventListener('click', e => {
+    const more = e.target.closest('[data-more]');
+    if (more) { S.newsFilter = 'picks'; renderNews(); return; }
+    const b = e.target.closest('.news-btn');
+    if (!b) return;
+    const sym = b.dataset.sym, open = !S.openNews.has(sym);
+    open ? S.openNews.add(sym) : S.openNews.delete(sym);
+    b.setAttribute('aria-expanded', open);
+    b.querySelector('.caret').textContent = open ? '▴' : '▾';
+    b.closest('tr').nextElementSibling.hidden = !open;
+  });
 
   // Highlight the tab for the section in view.
   const tabs = $$('#tabs a');
